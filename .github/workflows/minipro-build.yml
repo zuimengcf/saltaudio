@@ -55,5 +55,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: minipro-debug-apk
-          path: minipro/build/outputs/apk/debug/minipro-debug.apk
+          path: examples/android/minipro/build/outputs/apk/debug/minipro-debug.apk
           if-no-files-found: error
