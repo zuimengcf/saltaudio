@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-player-framework"
+version = "0.1.0"
+description = "A generic, player-agnostic MCP (Model Context Protocol) adapter layer for music players."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "MCP Player Framework contributors" }]
+keywords = ["mcp", "model-context-protocol", "music-player", "media3", "android"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[tool.setuptools]
+packages = ["mcp_server", "mcp_server.backends"]

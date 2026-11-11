@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ===== McpSettingsActivity 设置页 ===== -->
+    <string name="mcp_settings_title">MCP 控制面板</string>
+    <string name="mcp_not_initialized">MCP 未初始化</string>
+    <string name="mcp_sec_status">运行状态</string>
+    <string name="mcp_sec_token">访问 Token</string>
+    <string name="mcp_copy_token">复制 Token</string>
+    <string name="mcp_token_copied">MCP Token 已复制到剪贴板</string>
+    <string name="mcp_no_token">无可用 Token</string>
+    <string name="mcp_reset_token">重置 Token</string>
+    <string name="mcp_token_reset">MCP Token 已重置</string>
+    <string name="mcp_sec_runtime">运行控制</string>
+    <string name="mcp_start">启动 MCP</string>
+    <string name="mcp_started">已启动</string>
+    <string name="mcp_stop">停止 MCP</string>
+    <string name="mcp_stopped">已停止</string>
+    <string name="mcp_sec_playback">播放控制</string>
+    <string name="mcp_prev">⏮ 上一首</string>
+    <string name="mcp_play_pause">播放/暂停</string>
+    <string name="mcp_next">下一首 ⏭</string>
+    <string name="mcp_volume_btn">🔊 音量 -10% / +10%（长按切换）</string>
+    <string name="mcp_sec_security">安全配置</string>
+    <string name="mcp_lan_cb">监听局域网地址（多设备访问）</string>
+    <string name="mcp_loopback_cb">仅本机回环（关掉可让局域网 Host 放行）</string>
+    <string name="mcp_origin_cb">校验 Origin 头</string>
+    <string name="mcp_apply_security">应用并生效（重启监听）</string>
+    <string name="mcp_security_applied">安全配置已应用并重启监听</string>
+    <string name="mcp_sec_log">最近日志</string>
+    <string name="mcp_no_log">(暂无日志)</string>
+    <string name="mcp_status_service">服务: </string>
+    <string name="mcp_status_port">  端口: </string>
+    <string name="mcp_status_running_label">\n运行: </string>
+    <string name="mcp_running">运行中</string>
+    <string name="mcp_status_listeners">  监听: </string>
+    <string name="mcp_status_bridge_label">\n桥连接: </string>
+    <string name="mcp_connected">已连接</string>
+    <string name="mcp_not_connected">未连接</string>
+    <string name="mcp_status_auth_label">  鉴权: </string>
+    <string name="mcp_enabled">已启用</string>
+    <string name="mcp_disabled">未启用</string>
+    <string name="mcp_bridge_none">（桥未连接，无播放信息）</string>
+    <string name="mcp_playing">播放中</string>
+    <string name="mcp_paused">已暂停</string>
+    <string name="mcp_playback_state">状态: </string>
+    <string name="mcp_queue_label">  队列: </string>
+    <string name="mcp_mode_label">  模式: </string>
+    <string name="mcp_shuffle">随机</string>
+    <string name="mcp_sequential">顺序</string>
+    <string name="mcp_track_label">\n曲目: </string>
+    <string name="mcp_progress_label">\n进度: </string>
+    <string name="mcp_artist_sep">  —  </string>
+    <string name="mcp_volume_prefix">🔊 音量 </string>
+    <string name="mcp_volume_unavailable">（不可用）</string>
+    <string name="mcp_volume_hint">（点击-10% / 长按+10%）</string>
+
+    <!-- ===== McpControlServer securitySnapshot（设置页展示） ===== -->
+    <string name="mcp_sec_loopback">回环限制</string>
+    <string name="mcp_sec_loopback_only">仅本机</string>
+    <string name="mcp_sec_loopback_open">已放开</string>
+    <string name="mcp_sec_lan">局域网监听</string>
+    <string name="mcp_sec_on">开</string>
+    <string name="mcp_sec_off">关</string>
+    <string name="mcp_sec_max_conn">最大并发</string>
+    <string name="mcp_sec_socket_timeout">Socket 超时</string>
+    <string name="mcp_sec_max_body">请求体上限</string>
+    <string name="mcp_sec_max_response">响应体上限</string>
+    <string name="mcp_sec_host_check">Host 校验</string>
+    <string name="mcp_sec_origin_check">Origin 校验</string>
+    <string name="mcp_sec_error_sanitize">错误脱敏</string>
+
+    <!-- ===== McpStatusNotifier 常驻通知 ===== -->
+    <string name="mcp_notif_channel_desc">MCP 本地控制桥的状态与接入操作</string>
+    <string name="mcp_state_running">运行中 (%1$d 监听)</string>
+    <string name="mcp_state_stopped">已停止</string>
+    <string name="mcp_content_text">MCP: %1$s · %2$d</string>
+    <string name="mcp_notif_big">MCP 控制桥\n状态: %1$s\n端口: %2$d\n\nToken 不会直接在通知里显示。\n点「复制」取用，或「设置」打开设置页。</string>
+    <string name="mcp_action_copy">复制</string>
+    <string name="mcp_action_reset">重置</string>
+    <string name="mcp_action_settings">设置</string>
+
+    <!-- ===== McpShortcut 桌面快捷方式 ===== -->
+    <string name="mcp_shortcut_long">打开 MCP 控制面板</string>
+</resources>

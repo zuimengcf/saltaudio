@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- 通知动作接收器：复制/重置 token、打开设置页 -->
+        <receiver
+            android:name=".McpStatusNotifier$ActionReceiver"
+            android:exported="false" />
+        <!-- MCP 设置页：由通知「设置」按钮拉起 -->
+        <activity
+            android:name=".McpSettingsActivity"
+            android:exported="false" />
+    </application>
+</manifest>
