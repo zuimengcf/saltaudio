@@ -74,6 +74,34 @@ mcp-player-framework/
 (`mcp` 库) + 最简 media3 播放器 (`minipro`) 放进同一个 apk，启动后在
 `http://127.0.0.1:18790/mcp` 即可用 MCP 控制播放。详见 `examples/android/README.md`。
 
+## Android 内嵌 MCP 库（`:mcp`，Kotlin）
+
+`examples/android/mcp` 是可在任意播放器工程内嵌的通用 MCP-over-HTTP 控制库（Kotlin）：
+
+- **传输**：`POST /mcp`（HTTP JSON-RPC），本地回环 `http://127.0.0.1:<port>/mcp`
+- **协议**：双版本协商（`2025-06-18` / `2024-11-05`）、`server/discover`、`tools/list` 与
+  `tools/call` 响应携带 `resultType` / `ttlMs` / `cacheScope`，便于客户端缓存与类型感知
+- **安全**：Bearer 鉴权（可选 `accessToken`）、Host/Origin 校验、错误信息脱敏
+- **A 档增强**：
+  - `McpPage` —— 游标分页（Base64URL v1 cursor；`limit` / `offset` / `cursor` 三选一）
+  - `McpCommandChain` —— 链式命令解析，schema 注入 `commands` 字段，一次调用多指令
+  - `McpCommandGate` —— 播放命令互斥栅栏（`budgetMs=3000`），冲突时返回 Busy 而非排队
+- **错误模型**：结构化错误 `failure_category` / `failure_stage` / `cause_category` / `cause_message`
+- **3 秒规则**：`playback_previous` 若当前播放进度超过 3 秒，本次调用只会回到本曲开头
+  （不切歌），需再次调用才会真正切到上一首；若当前进度不超过 3 秒直接切上一首
+
+## 发行物
+
+本仓库同时分发两个安装包（见 Releases）：
+
+| 资产 | 角色 | 说明 |
+|---|---|---|
+| `SaltAudio-0.5.29-main.apk` | 主体播放器 | 本项目深度定制版，内嵌完整 MCP 控制面（`:mcp` 库），**闭源分发**——仅提供 APK，不随仓库提供源码 |
+| `MiniPro-1.0-example.apk` | 开源示例 | 对应 `examples/android`，一行代码注入即得 MCP 控制能力的演示宿主，源代码即本仓库 `examples/android/`（MIT） |
+
+- **SaltAudio（主体）**：以本框架的 `:mcp` 库为内核深度定制而成，与 MiniPro 共用同一套 MCP 服务实现；因闭源，仓库中不含其源码。
+- **MiniPro（示例）**：完整开源，可供开发者对照学习"如何给自己的播放器接入 MCP"。
+
 ## 安装
 
 零第三方依赖，仅需 Python 3.9+：
