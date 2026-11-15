@@ -46,6 +46,14 @@ object McpControlServer {
     @Volatile private var scannedTracks: List<TrackRef> = emptyList()
     private val tokenRng = SecureRandom()
 
+    /** 播放命令互斥栅栏：并发播放操作防止互相踩踏（下放自盐音 app 层 commandLock 范式） */
+    private val commandGate = McpCommandGate(budgetMs = 3_000L)
+
+    // ---------- MCP 协议版本（对齐盐版双协议协商） ----------
+    private const val MODERN_PROTOCOL_VERSION = "2025-06-18"
+    private const val LEGACY_PROTOCOL_VERSION = "2024-11-05"
+    private val SUPPORTED_PROTOCOL_VERSIONS = listOf(MODERN_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION)
+
     /** 若 config 未显式设置 accessToken，则自动生成并返回。 */
     @Volatile private var generatedToken: String? = null
 
@@ -322,7 +330,9 @@ object McpControlServer {
         if (token != null) {
             val auth = request.headers["authorization"]
             if (auth != "Bearer $token") {
-                writeResponse(output, 401, """{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}""")
+                // 401 + WWW-Authenticate challenge，对齐盐版 McpBridge 语义
+                writeResponse(output, 401, """{"jsonrpc":"2.0","error":{"code":-32001,"message":"unauthorized"}}""",
+                    extraHeaders = mapOf("WWW-Authenticate" to "Bearer realm=\"${cfg.serverName}\""))
                 runCatching { socket.close() }
                 return
             }
@@ -393,11 +403,13 @@ object McpControlServer {
         }
     }
 
-    private fun writeResponse(output: BufferedOutputStream, status: Int, body: String) {
+    private fun writeResponse(output: BufferedOutputStream, status: Int, body: String, extraHeaders: Map<String, String> = emptyMap()) {
         val bytes = body.toByteArray(Charsets.UTF_8)
+        val extra = extraHeaders.entries.joinToString("") { "${it.key}: ${it.value}\r\n" }
         val head = "HTTP/1.1 $status ${reason(status)}\r\n" +
             "Content-Type: application/json\r\n" +
             "Content-Length: ${bytes.size}\r\n" +
+            extra +
             "Connection: close\r\n\r\n"
         output.write(head.toByteArray(Charsets.US_ASCII))
         output.write(bytes)
@@ -436,13 +448,38 @@ object McpControlServer {
         val params = json.optJSONObject("params") ?: JSONObject()
         val responseBody: String = try {
             when (method) {
-                "initialize" -> wrapResult(id, JSONObject()
-                    .put("protocolVersion", params.optString("protocolVersion", "2025-06-18"))
-                    .put("serverInfo", JSONObject().put("name", cfg.serverName).put("version", cfg.serverVersion))
-                    .put("capabilities", JSONObject().put("tools", JSONObject())))
+                "initialize" -> {
+                    val requested = params.optString("protocolVersion", "")
+                    // 版本协商：请求在支持列表内则回该版本，否则默认 modern
+                    val negotiated = if (requested in SUPPORTED_PROTOCOL_VERSIONS) requested else MODERN_PROTOCOL_VERSION
+                    wrapResult(id, JSONObject()
+                        .put("protocolVersion", negotiated)
+                        .put("serverInfo", JSONObject().put("name", cfg.serverName).put("version", cfg.serverVersion))
+                        .put("capabilities", JSONObject().put("tools", JSONObject().put("listChanged", false)))
+                        .put("instructions", "SaltAudio MCP control server. 播放层 playback_* / 队列层 queue_* / 曲库层 library_* / 设置层 settings_* / 运维 logs_get。"))
+                }
+                "server/discover" -> {
+                    // 现代 MCP 发现端点（resultType 语义，对齐盐版）
+                    wrapResult(id, JSONObject()
+                        .put("resultType", "complete")
+                        .put("supportedVersions", JSONArray().apply {
+                            SUPPORTED_PROTOCOL_VERSIONS.forEach { put(it) }
+                        })
+                        .put("capabilities", JSONObject().put("tools", JSONObject()))
+                        .put("instructions", "SaltAudio MCP control server")
+                        .put("ttlMs", 3_600_000)
+                        .put("cacheScope", "public"))
+                }
                 "notifications/initialized", "initialized" -> wrapResult(id, JSONObject().put("ok", true))
-                "tools/list" -> wrapResult(id, toolsList())
-                "tools/call" -> wrapResult(id, callTool(params, cfg, ctx))
+                "tools/list" -> {
+                    // 现代协议回 resultType 语义
+                    wrapResult(id, toolsList().apply {
+                        put("resultType", "complete")
+                        put("ttlMs", 3_600_000)
+                        put("cacheScope", "public")
+                    })
+                }
+                "tools/call" -> wrapResult(id, callTool(params, cfg, ctx).apply { put("resultType", "complete") })
                 "ping" -> wrapResult(id, JSONObject().put("ok", true))
                 else -> JSONObject()
                     .put("jsonrpc", "2.0")
@@ -452,10 +489,16 @@ object McpControlServer {
             }
         } catch (e: ToolError) {
             McpLog.log("error $method: ${e.message}")
+            val err = JSONObject()
+                .put("isError", true)
+                .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", e.message ?: "error")))
+                .put("failure_category", e.failureCategory)
+            e.failureStage?.let { err.put("failure_stage", it) }
+            e.causeCategory?.let { err.put("cause_category", it) }
+            e.causeMessage?.let { err.put("cause_message", it) }
             JSONObject()
                 .put("jsonrpc", "2.0").put("id", id)
-                .put("result", JSONObject().put("isError", true).put("content",
-                    JSONArray().put(JSONObject().put("type", "text").put("text", e.message ?: "error"))))
+                .put("result", err)
                 .toString()
         } catch (e: Exception) {
             McpLog.log("internal error $method: ${e.message}")
@@ -485,7 +528,7 @@ object McpControlServer {
             .toString()
     }
 
-    /** 错误消息脱敏：隐藏 Bearer token、Authorization 值、超长十六进制/hash。 */
+    /** 错误消息脱敏：隐藏 Bearer token、Authorization 值、超长十六进制/hash、URI、session 类字段。 */
     private fun sanitizeErrorText(text: String): String {
         var s = text
         // 隐藏 "Bearer <token>"
@@ -494,19 +537,32 @@ object McpControlServer {
         s = Regex("#?[0-9a-fA-F]{40,}").replace(s) { "<redacted:" + it.value.length + ">" }
         // 隐藏带引号的密钥值
         s = Regex("(\"(?:token|secret|password|authorization)\"\\s*:\\s*\")[^\"]{4,}\"").replace(s) { it.value.substringBefore('"') }
+        // 隐藏 token/sid/session 类字段（键值或裸值）
+        s = Regex("""(?i)["']?(?:token|sid|session[-_ ]?id|authorization)["']?\s*[:=]\s*["']?[^\s,;"'}]+""")
+            .replace(s) { "[redacted-field]" }
+        // 隐藏 URI（file/http/content 等）
+        s = Regex("""(?i)\b[a-z][a-z0-9+.-]*://[^\s,;"'}]+""").replace(s) { "[redacted-uri]" }
         return s
     }
 
-    private class ToolError(msg: String) : Exception(msg)
+    private class ToolError(
+        msg: String,
+        val failureCategory: String = "OperationUnavailable",
+        val failureStage: String? = null,
+        val causeCategory: String? = null,
+        val causeMessage: String? = null,
+    ) : Exception(msg)
 
     // ---------- 工具 ----------
 
     private fun toolsList(): JSONObject {
         val tools = JSONArray()
         fun t(name: String, desc: String, schema: String = "{}") {
+            // 统一注入链式命令字段，让任意工具可附带后续命令队列（下放自盐音 app 层 commands 范式）
+            val input = McpCommandChain.injectSchema(JSONObject(schema))
             tools.put(JSONObject()
                 .put("name", name).put("description", desc)
-                .put("inputSchema", JSONObject(schema)))
+                .put("inputSchema", input))
         }
         // 播放层
         t("playback_get_state", "读取当前播放状态：播放/暂停/进度/时长/队列/当前曲目/播放模式")
@@ -514,7 +570,7 @@ object McpControlServer {
         t("playback_play", "开始或继续播放（不替换队列）")
         t("playback_pause", "暂停播放")
         t("playback_next", "切换到队列下一首")
-        t("playback_previous", "切换到队列上一首（播放超过 3 秒先回到开头）")
+        t("playback_previous", "切换到队列上一首。注意 3 秒规则：若当前播放进度超过 3 秒，本次调用只会回到本曲开头（不切歌），需再次调用（此时进度低于 3 秒）才会真正切到上一首；若当前进度不超过 3 秒，本次调用直接切到上一首。建议连续调用两次以稳定完成“上一首”")
         t("playback_seek", "跳转到指定毫秒位置", """{"type":"object","properties":{"position_ms":{"type":"integer","description":"目标位置（毫秒），≥0"}},"required":["position_ms"]}""")
         t("playback_set_mode", "设置播放模式", """{"type":"object","properties":{"mode":{"type":"string","enum":["SEQUENTIAL","LIST_LOOP","SINGLE_LOOP","SHUFFLE"],"description":"播放模式"}},"required":["mode"]}""")
         t("playback_set_volume", "设置播放器音量（0.0–1.0，播放器级，不影响系统媒体音量）", """{"type":"object","properties":{"volume":{"type":"number","description":"目标音量，0.0 静音 – 1.0 最大"}},"required":["volume"]}""")
@@ -526,9 +582,9 @@ object McpControlServer {
         t("queue_remove_item", "按索引移除队列项", """{"type":"object","properties":{"index":{"type":"integer","description":"队列位置（0 起）"}},"required":["index"]}""")
         t("queue_move_item", "移动队列项", """{"type":"object","properties":{"from_index":{"type":"integer","description":"当前位置（0 起）"},"to_index":{"type":"integer","description":"目标位置（0 起）"}},"required":["from_index","to_index"]}""")
         // 曲库层
-        t("library_list_tracks", "分页列出曲库曲目", """{"type":"object","properties":{"query":{"type":"string","description":"可选，按标题/艺术家/专辑模糊搜索"},"limit":{"type":"integer","description":"每页数量（1–200，默认 50）"},"offset":{"type":"integer","description":"从 0 开始的偏移，默认 0"}}}""")
+        t("library_list_tracks", "分页列出曲库曲目。limit/offset 与 cursor 二选一；返回 next_cursor/next_offset 继续翻页。", """{"type":"object","properties":{"query":{"type":"string","description":"可选，按标题/艺术家/专辑模糊搜索"},"limit":{"type":"integer","description":"每页数量（1–200，默认 50）"},"offset":{"type":"integer","description":"从 0 开始的偏移，默认 0，不能与 cursor 同时传"},"cursor":{"type":"string","description":"上一页返回的 next_cursor；不能与 offset 同时传"}}}""")
         t("library_get_track", "按 ID 获取单曲详情", """{"type":"object","properties":{"track_id":{"type":"integer","description":"曲库曲目 ID"}},"required":["track_id"]}""")
-        t("library_search_tracks", "搜索曲库（标题/艺术家/专辑模糊匹配）", """{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"limit":{"type":"integer","description":"最多返回数量（默认 50）"}},"required":["query"]}""")
+        t("library_search_tracks", "搜索曲库（标题/艺术家/专辑模糊匹配）。limit/offset 与 cursor 二选一；返回 next_cursor/next_offset 继续翻页。", """{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词"},"limit":{"type":"integer","description":"每页数量（1–200，默认 50）"},"offset":{"type":"integer","description":"从 0 开始的偏移，默认 0，不能与 cursor 同时传"},"cursor":{"type":"string","description":"上一页返回的 next_cursor；不能与 offset 同时传"}},"required":["query"]}""")
         t("library_get_summary", "曲库统计：歌曲总数、艺术家数、专辑数、总时长")
         t("library_get_playlists", "获取播放清单。后端不支持时返回 supported=false（属正常情况，非错误）。")
         t("library_refresh", "请求重新扫描曲库（后台异步）")
@@ -544,13 +600,16 @@ object McpControlServer {
 
     private fun callTool(params: JSONObject, cfg: McpControlConfig, ctx: Context): JSONObject {
         val name = params.optString("name")
-        val args = params.optJSONObject("arguments") ?: JSONObject()
+        val rawArgs = params.optJSONObject("arguments") ?: JSONObject()
+        // 链式命令：从参数里摘出 commands 队列，主工具执行完后按序放行（下放自盐音 app 层）
+        val (chain, args) = McpCommandChain.extract(rawArgs)
         // 日志只记工具名与参数键，不记参数值（避免敏感值经 logs_get/logcat 外漏）。
         McpLog.log("call $name args=[${args.keys().asSequence().joinToString(",")}]")
-        val data: Any = when (name) {
-            // 播放层
-            "playback_get_state" -> playbackState()
-            "playback_toggle" -> bridgeOp("playback_toggle") { it.togglePlayPause() }
+        val data: Any = try {
+            when (name) {
+                // 播放层
+                "playback_get_state" -> playbackState()
+                "playback_toggle" -> bridgeOp("playback_toggle") { it.togglePlayPause() }
             "playback_play" -> bridgeOp("playback_play") { it.play() }
             "playback_pause" -> bridgeOp("playback_pause") { it.pause() }
             "playback_next" -> bridgeOp("playback_next") { it.next() }
@@ -593,22 +652,20 @@ object McpControlServer {
             // 曲库层
             "library_list_tracks" -> {
                 val query = args.optString("query", "").lowercase()
-                val limit = args.optInt("limit", 50).coerceIn(1, 200)
-                val offset = args.optInt("offset", 0).coerceAtLeast(0)
+                val limitOpt = if (args.has("limit")) args.getInt("limit") else null
+                val offsetOpt = if (args.has("offset")) args.getInt("offset") else null
+                val cursor = if (args.has("cursor") && !args.isNull("cursor")) args.getString("cursor") else null
                 val all = ensureTracks(ctx)
                 val filtered = all.filter { query.isEmpty() ||
                     (it.title ?: "").lowercase().contains(query) ||
                     (it.artist ?: "").lowercase().contains(query) ||
                     (it.album ?: "").lowercase().contains(query) }
-                val page = filtered.drop(offset).take(limit)
-                JSONObject().put("ok", true).put("total", filtered.size)
-                    .put("offset", offset).put("limit", limit)
-                    .put("returned", page.size)
-                    .put("tracks", JSONArray().apply { page.forEach { tr ->
-                        put(JSONObject()
-                            .put("id", tr.id).put("title", tr.title).put("artist", tr.artist)
-                            .put("album", tr.album).put("duration_ms", tr.durationMs))
-                    } })
+                McpPage.pageJson(filtered, limitOpt, offsetOpt, cursor) { tr ->
+                    JSONObject()
+                        .put("id", tr.id).put("title", tr.title).put("artist", tr.artist)
+                        .put("album", tr.album).put("duration_ms", tr.durationMs)
+                }
+                    .put("ok", true).put("source_kind", "LOCAL_LIBRARY")
             }
             "library_get_track" -> {
                 val id = args.optLong("track_id", -1L)
@@ -620,18 +677,20 @@ object McpControlServer {
             }
             "library_search_tracks" -> {
                 val q = args.optString("query", "").lowercase()
-                val limit = args.optInt("limit", 50).coerceIn(1, 200)
+                val limitOpt = if (args.has("limit")) args.getInt("limit") else null
+                val offsetOpt = if (args.has("offset")) args.getInt("offset") else null
+                val cursor = if (args.has("cursor") && !args.isNull("cursor")) args.getString("cursor") else null
                 val results = ensureTracks(ctx).filter {
                     (it.title ?: "").lowercase().contains(q) ||
                     (it.artist ?: "").lowercase().contains(q) ||
                     (it.album ?: "").lowercase().contains(q)
-                }.take(limit)
-                JSONObject().put("ok", true).put("count", results.size)
-                    .put("tracks", JSONArray().apply { results.forEach { tr ->
-                        put(JSONObject()
-                            .put("id", tr.id).put("title", tr.title).put("artist", tr.artist)
-                            .put("album", tr.album).put("duration_ms", tr.durationMs))
-                    } })
+                }
+                McpPage.pageJson(results, limitOpt, offsetOpt, cursor) { tr ->
+                    JSONObject()
+                        .put("id", tr.id).put("title", tr.title).put("artist", tr.artist)
+                        .put("album", tr.album).put("duration_ms", tr.durationMs)
+                }
+                    .put("ok", true).put("source_kind", "LOCAL_LIBRARY")
             }
             "library_get_summary" -> {
                 val tracks = ensureTracks(ctx)
@@ -678,12 +737,30 @@ object McpControlServer {
                     .put("log", all.takeLast(lines).joinToString("\n"))
             }
             else -> throw ToolError("unknown tool: $name")
+            }
+        } catch (e: IllegalArgumentException) {
+            McpLog.log("invalid args $name: ${e.message}")
+            throw ToolError("invalid arguments for $name: ${e.message}")
         }
         McpLog.log("done $name")
+        // 链式命令：主工具执行成功后，按序放行后续命令（下放自盐音 app 层）
+        runChain(chain, cfg, ctx)
         return JSONObject()
             .put("content", JSONArray().put(JSONObject().put("type", "text").put("text", data.toString())))
             .put("structuredContent", data)
             .put("isError", false)
+    }
+
+    /** 依次放行链式命令队列；每个命令独立执行，失败不中断后续。 */
+    private fun runChain(chain: List<Pair<String, JSONObject>>, cfg: McpControlConfig, ctx: Context) {
+        if (chain.isEmpty()) return
+        chain.forEach { (subName, subArgs) ->
+            runCatching {
+                callTool(JSONObject()
+                    .put("name", subName)
+                    .put("arguments", subArgs), cfg, ctx)
+            }.onFailure { McpLog.log("chain $subName failed: ${it.message}") }
+        }
     }
 
     private fun okAfter(action: String, vararg extra: Pair<String, Any?>): JSONObject {
@@ -736,13 +813,30 @@ object McpControlServer {
         val items = (0 until ids.length()).mapNotNull { byId[ids.optLong(it, -1L)] }
         if (items.isEmpty()) throw ToolError("no matching tracks found in MediaStore")
         val b = ensureBridge() ?: throw ToolError("player not connected — host app not running?")
-        b.playQueue(items, start)
-        val o = JSONObject().put("ok", true).put("action", "STARTED").put("queued", items.size)
-        o.put("state", stateJson(b.snapshot()))
-        return o
+        return commandGate.runOrBusy {
+            b.playQueue(items, start)
+            val o = JSONObject().put("ok", true).put("action", "STARTED").put("queued", items.size)
+            // 状态确认：起播后回读真实状态，若当前曲目未落到目标曲目则标记 confirmation_pending
+            val snap = b.snapshot()
+            val targetId = items.getOrNull(start.coerceIn(0, items.size - 1))?.id
+            val confirmed = snap.currentTitle != null && (targetId == null || snap.currentIndex in 0 until snap.queueSize)
+            when {
+                confirmed -> { o.put("started", true).put("confirmation_pending", false) }
+                else -> { o.put("started", false).put("confirmation_pending", true) }
+            }
+            o.put("state", stateJson(snap))
+            o
+        }.let {
+            when (it) {
+                is McpCommandGate.CommandResult.Busy -> JSONObject()
+                    .put("ok", false).put("error", "another playback operation in progress; try again later")
+                    .put("failure_category", "PlaybackOperationBusy")
+                is McpCommandGate.CommandResult.Ok -> it.value
+            }
+        }
     }
 
-    /** 队列操作通用辅助：解析 track_ids → TrackRef → 调 bridge 队列方法 */
+    /** 队列操作通用辅助：解析 track_ids → TrackRef → 调 bridge 队列方法（经命令栅栏串行化） */
     private fun queueOp(args: JSONObject, ctx: Context, op: (PlayerBridge, List<TrackRef>) -> Unit): JSONObject {
         val ids = args.optJSONArray("track_ids") ?: throw ToolError("track_ids required")
         if (ids.length() == 0) throw ToolError("track_ids empty")
@@ -750,8 +844,17 @@ object McpControlServer {
         val items = (0 until ids.length()).mapNotNull { byId[ids.optLong(it, -1L)] }
         if (items.isEmpty()) throw ToolError("no matching tracks found in MediaStore")
         val b = ensureBridge() ?: throw ToolError("player not connected — host app not running?")
-        runCatching { op(b, items) }.getOrElse { throw ToolError("queue operation failed: ${it.message}") }
-        return okAfter("queue_op", "queued" to items.size)
+        return commandGate.runOrBusy {
+            runCatching { op(b, items) }.getOrElse { throw ToolError("queue operation failed: ${it.message}") }
+            okAfter("queue_op", "queued" to items.size)
+        }.let {
+            when (it) {
+                is McpCommandGate.CommandResult.Busy -> JSONObject()
+                    .put("ok", false).put("error", "another playback operation in progress; try again later")
+                    .put("failure_category", "PlaybackOperationBusy")
+                is McpCommandGate.CommandResult.Ok -> it.value
+            }
+        }
     }
 
     @Synchronized
